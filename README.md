@@ -4,7 +4,7 @@ References
 ----------
 
 * [Fast R-CNN.](https://arxiv.org/abs/1504.08083) Ross Girshick. ICCV 2015.
-* [Faster R-CNN: Towards Real-Time Object Detection with Region Proposal Networks.](https://arxiv.org/abs/1502.03044) Shaoqing Ren, Kaiming He, Ross Girshick, Jian Sun. NIPS 2015.
+* [Faster R-CNN: Towards Real-Time Object Detection with Region Proposal Networks.](https://arxiv.org/abs/1506.01497) Shaoqing Ren, Kaiming He, Ross Girshick, Jian Sun. NIPS 2015.
 * [Deep Residual Learning for Image Recognition.](https://arxiv.org/abs/1512.03385) 
 Kaiming He, Xiangyu Zhang, Shaoqing Ren, Jian Sun. CVPR 2016.
 * [Faster R-CNN in Caffe (Matlab version)](https://github.com/ShaoqingRen/faster_rcnn)
