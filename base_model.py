@@ -209,7 +209,7 @@ class BaseModel(object):
         E.summarize() 
         print("Validation complete.")
 
-    def test(self, sess, test_dataset, show_rois=True, show_dets=True):
+    def test(self, sess, test_dataset, show_rois=False, show_dets=True):
         print("Testing the model ...")
         num_rois = self.num_rois
         result_dir = self.params.test_result_dir
