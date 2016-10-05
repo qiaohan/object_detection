@@ -2,7 +2,7 @@ This is a Tensorflow implementation of the object detector described by the pape
 
 Note 
 ----
-I perform the RoI pooling layer by concatenating a RoI warping layer and a standard max pooling layer, as suggested by the paper "Instance-aware Semantic Segmentation via Multi-task Network Cascades" by Dai et al. Currently, the RoI warping layer is implemented in NumPy. It can be also implemented in Tensorflow, but doing so leads to an unusually large Tensorflow model and my GPU could not handle it well. It is left as future work to incorporate everything into Tensorflow and accomplish end-to-end training of the whole system.
+I perform the RoI pooling layer by concatenating a RoI warping layer and a standard max pooling layer, as suggested by the paper "Instance-aware Semantic Segmentation via Multi-task Network Cascades" by Dai et al. Currently, the RoI warping layer is implemented in NumPy. It can be also implemented in Tensorflow, but doing so seems to result in an unusually large Tensorflow model. It is left as future work to incorporate everything into Tensorflow and accomplish end-to-end training of the whole system.
 
 References
 ----------
