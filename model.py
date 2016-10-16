@@ -29,7 +29,7 @@ class ObjectDetector(BaseModel):
 
     def build_basic_vgg16(self):
         print("Building the basic VGG16 net...")
-        bn = self.params.batch_norm
+        bn = self.batch_norm
 
         img_files = tf.placeholder(tf.string, [self.batch_size])
         is_train = tf.placeholder(tf.bool)
@@ -117,7 +117,7 @@ class ObjectDetector(BaseModel):
 
     def build_basic_resnet50(self):
         print("Building the basic ResNet50 net...")
-        bn = self.params.batch_norm
+        bn = self.batch_norm
 
         img_files = tf.placeholder(tf.string, [self.batch_size])
         is_train = tf.placeholder(tf.bool)
@@ -163,7 +163,7 @@ class ObjectDetector(BaseModel):
 
     def build_basic_resnet101(self):
         print("Building the basic ResNet101 net...")
-        bn = self.params.batch_norm
+        bn = self.batch_norm
 
         img_files = tf.placeholder(tf.string, [self.batch_size])
         is_train = tf.placeholder(tf.bool)
@@ -209,7 +209,7 @@ class ObjectDetector(BaseModel):
 
     def build_basic_resnet152(self):
         print("Building the basic ResNet152 net...")
-        bn = self.params.batch_norm
+        bn = self.batch_norm
 
         img_files = tf.placeholder(tf.string, [self.batch_size])
         is_train = tf.placeholder(tf.bool)
@@ -256,11 +256,10 @@ class ObjectDetector(BaseModel):
     def build_rpn(self):
         print("Building the RPN...")
         params = self.params
-        bn = params.batch_norm
+        bn = self.batch_norm
         is_train = self.is_train
 
-        self.anchors, self.anchor_in_img = generate_anchors(self.img_shape[:2], self.conv_feat_shape[:2], self.anchor_scales, self.anchor_ratios)
-        self.num_anchors_per_location = len(self.anchor_scales) * len(self.anchor_ratios)
+        self.anchors, self.anchor_in_img, self.num_anchor_in_img = generate_anchors(self.img_shape[:2], self.conv_feat_shape[:2], self.anchor_scales, self.anchor_ratios)
         self.num_anchors = self.conv_feat_shape[0] * self.conv_feat_shape[1] * self.num_anchors_per_location
 
         feats = tf.placeholder(tf.float32, [self.batch_size]+self.conv_feat_shape) 
@@ -273,22 +272,29 @@ class ObjectDetector(BaseModel):
         self.gt_anchor_regs = gt_anchor_regs
         self.anchor_masks = anchor_masks
 
-        rpn1 = convolution(feats, 3, 3, 512, 1, 1, 'rpn1', init_w='normal', stddev=0.01, group_id=1)
+        rpn1 = convolution(feats, 5, 5, 512, 1, 1, 'rpn1', init_w='normal', stddev=0.01, group_id=1)
         rpn1 = nonlinear(rpn1, 'relu')
 
         rpn_logits = convolution(rpn1, 1, 1, 2*self.num_anchors_per_location, 1, 1, 'rpn_logits', init_w='normal',  stddev=0.01, group_id=1)
-        rpn_regs = convolution(rpn1, 1, 1, 4*self.num_anchors_per_location, 1, 1, 'rpn_regs', init_w='normal', stddev=0.01, group_id=1)
-
         rpn_logits = tf.reshape(rpn_logits, [-1, 2])
-        rpn_regs = tf.reshape(rpn_regs, [-1, 4])
+
+        if self.bbox_reg:
+            rpn_regs = convolution(rpn1, 1, 1, 4*self.num_anchors_per_location, 1, 1, 'rpn_regs', init_w='normal', stddev=0.01, group_id=1)
+            rpn_regs = tf.reshape(rpn_regs, [-1, 4])
 
         gt_anchor_clss = tf.reshape(gt_anchor_clss, [-1])       
         gt_anchor_regs = tf.reshape(gt_anchor_regs, [-1, 4])
         anchor_masks = tf.reshape(anchor_masks, [-1])
 
-        loss0 = tf.nn.sparse_softmax_cross_entropy_with_logits(rpn_logits, gt_anchor_clss)
-        loss0 += params.rpn_reg_weight * tf.to_float(gt_anchor_clss) * self.smooth_l1_loss(rpn_regs, gt_anchor_regs)
-        loss0 = tf.reduce_sum(loss0 * anchor_masks) / tf.reduce_sum(anchor_masks)
+        loss0 = tf.nn.sparse_softmax_cross_entropy_with_logits(rpn_logits, gt_anchor_clss) * anchor_masks
+        loss0 = tf.reduce_sum(loss0) / tf.reduce_sum(anchor_masks)
+
+        if self.bbox_reg:
+            anchor_reg_masks = anchor_masks * tf.to_float(gt_anchor_clss)
+            w = self.smooth_l1_loss(rpn_regs, gt_anchor_regs) * anchor_reg_masks
+            z = tf.reduce_sum(anchor_reg_masks)
+            loss0 = tf.cond(tf.less(0.0, z), lambda: loss0 + params.rpn_reg_weight * tf.reduce_sum(w) / z, lambda: loss0)
+
         loss1 = params.weight_decay * tf.add_n(tf.get_collection('l2_1'))
         loss = loss0 + loss1
 
@@ -307,15 +313,18 @@ class ObjectDetector(BaseModel):
         rpn_scores = tf.squeeze(tf.slice(rpn_probs, [0, 1], [-1, 1]))
 
         rpn_scores = tf.reshape(rpn_scores, [self.batch_size, self.num_anchors])
-        rpn_regs = tf.reshape(rpn_regs, [self.batch_size, self.num_anchors, 4])
-        
+
         self.rpn_loss = loss
         self.rpn_loss0 = loss0
         self.rpn_loss1 = loss1
         self.rpn_opt_op = opt_op
 
         self.rpn_scores = rpn_scores
-        self.rpn_regs = rpn_regs
+
+        if self.bbox_reg:
+            rpn_regs = tf.reshape(rpn_regs, [self.batch_size, self.num_anchors, 4])          
+            self.rpn_regs = rpn_regs
+
         print("RPN built.")
 
     def smooth_l1_loss(self, s, t): # we compose known differentiable functions to implement smooth l1 loss function
@@ -331,7 +340,7 @@ class ObjectDetector(BaseModel):
         params = self.params
         num_rois = self.num_rois
         is_train = self.is_train
-        bn = params.batch_norm
+        bn = self.batch_norm
 
         roi_warped_feats = tf.placeholder(tf.float32, [self.batch_size, num_rois]+self.roi_warped_feat_shape)  
         gt_roi_clss = tf.placeholder(tf.int32, [self.batch_size, num_rois]) 
@@ -364,21 +373,25 @@ class ObjectDetector(BaseModel):
         roi_masks = tf.reshape(roi_masks, [-1])
         roi_reg_masks = tf.reshape(roi_reg_masks, [-1])
 
-        if params.bbox_per_class:
-            regs = fully_connected(fc7_feats, 4*self.num_classes, 'cls_reg', init_w='normal', stddev=0.001, group_id=2)
-            relevant_regs = []
-            for i in range(self.batch_size*num_rois):
-                relevant_regs.append(tf.squeeze(tf.slice(regs, [i, 4*gt_roi_clss[i]], [1, 4])))
-            relevant_regs = tf.pack(relevant_regs) 
-        else:
-            regs = fully_connected(fc7_feats, 4, 'cls_reg', init_w='normal', stddev=0.001, group_id=2)
-            relevant_regs = regs
+        if self.bbox_reg:
+            if self.bbox_per_class:
+                regs = fully_connected(fc7_feats, 4*self.num_classes, 'cls_reg', init_w='normal', stddev=0.001, group_id=2)
+                relevant_regs = []
+                for i in range(self.batch_size*num_rois):
+                    relevant_regs.append(tf.squeeze(tf.slice(regs, [i, 4*gt_roi_clss[i]], [1, 4])))
+                relevant_regs = tf.pack(relevant_regs) 
+            else:
+                regs = fully_connected(fc7_feats, 4, 'cls_reg', init_w='normal', stddev=0.001, group_id=2)
+                relevant_regs = regs
 
         loss0 = tf.nn.sparse_softmax_cross_entropy_with_logits(logits, gt_roi_clss) * roi_masks
         loss0 = tf.reduce_sum(loss0) / tf.reduce_sum(roi_masks)
-        w = self.smooth_l1_loss(relevant_regs, gt_roi_regs) * roi_reg_masks
-        z = tf.reduce_sum(roi_reg_masks)
-        loss0 = tf.cond(tf.less(0.0, z), lambda: loss0 + params.cls_reg_weight * tf.reduce_sum(w) / z, lambda: loss0)
+    
+        if self.bbox_reg:
+            w = self.smooth_l1_loss(relevant_regs, gt_roi_regs) * roi_reg_masks
+            z = tf.reduce_sum(roi_reg_masks)
+            loss0 = tf.cond(tf.less(0.0, z), lambda: loss0 + params.cls_reg_weight * tf.reduce_sum(w) / z, lambda: loss0)
+
         loss1 = params.weight_decay * tf.add_n(tf.get_collection('l2_2'))
         loss = loss0 + loss1
 
@@ -398,17 +411,8 @@ class ObjectDetector(BaseModel):
         scores = tf.reduce_max(probs, 1) 
         scores = scores * roi_masks
 
-        if params.bbox_per_class:
-            res_regs = []
-            for i in range(self.batch_size*num_rois):
-                res_regs.append(tf.squeeze(tf.slice(regs, [i, 4*clss[i]], [1, 4])))
-            res_regs = tf.pack(res_regs) 
-        else:
-            res_regs = regs
-
         res_clss = tf.reshape(clss, [self.batch_size, num_rois])
         res_scores = tf.reshape(scores, [self.batch_size, num_rois])
-        res_regs = tf.reshape(res_regs, [self.batch_size, num_rois, 4])
 
         self.cls_loss = loss
         self.cls_loss0 = loss0
@@ -416,8 +420,18 @@ class ObjectDetector(BaseModel):
         self.cls_opt_op = opt_op
 
         self.res_clss = res_clss
-        self.res_regs = res_regs
         self.res_scores = res_scores
+
+        if self.bbox_reg:
+            if self.bbox_per_class:
+                res_regs = []
+                for i in range(self.batch_size*num_rois):
+                    res_regs.append(tf.squeeze(tf.slice(regs, [i, 4*clss[i]], [1, 4])))
+                res_regs = tf.pack(res_regs) 
+            else:
+                res_regs = regs
+            res_regs = tf.reshape(res_regs, [self.batch_size, num_rois, 4])
+            self.res_regs = res_regs
   
         print("Classifier built.")
 
@@ -542,12 +556,14 @@ class ObjectDetector(BaseModel):
             anchor_data = np.load(anchor_files[i])
             clss = anchor_data['clss']
             regs = anchor_data['regs']
-            masks = sample_anchors(clss)
+
+            masks = sample_anchors(clss, self.num_anchors_per_location)
             clss[np.where(clss==-1)[0]] = 0
+
             gt_anchor_clss.append(clss)
             gt_anchor_regs.append(regs)
             anchor_masks.append(masks)
-            
+
         gt_anchor_clss = np.array(gt_anchor_clss)
         gt_anchor_regs = np.array(gt_anchor_regs)
         anchor_masks = np.array(anchor_masks)

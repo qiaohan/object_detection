@@ -30,8 +30,11 @@ def main(argv):
     parser.add_argument('--train_pascal_annotation_dir', default = './train/pascal/annotations/') 
     parser.add_argument('--train_pascal_data_dir', default = './train/pascal/data/')
 
-    parser.add_argument('--val_image_dir', default = './val/images/')
-    parser.add_argument('--val_annotation_file', default = './val/instances_val2014.json')
+    parser.add_argument('--val_coco_image_dir', default = './val/coco/images/')
+    parser.add_argument('--val_coco_annotation_file', default = './val/coco/instances_val2014.json')
+
+    parser.add_argument('--val_pascal_image_dir', default = './val/pascal/images/')
+    parser.add_argument('--val_pascal_annotation_dir', default = './val/pascal/annotations/')
 
     parser.add_argument('--test_image_dir', default = './test/images/')
     parser.add_argument('--test_result_file', default = './test/result.pickle')
@@ -43,19 +46,20 @@ def main(argv):
     parser.add_argument('--solver', default = 'adam') 
     parser.add_argument('--num_epochs', type = int, default = 100) 
     parser.add_argument('--batch_size', type = int, default = 16) 
-    parser.add_argument('--learning_rate', type = float, default = 5e-5) 
+    parser.add_argument('--learning_rate', type = float, default = 2e-5) 
     parser.add_argument('--momentum', type = float, default = 0.9) 
     parser.add_argument('--decay', type = float, default = 0.9) 
-    parser.add_argument('--weight_decay', type = float, default = 2e-4)    
+    parser.add_argument('--weight_decay', type = float, default = 3e-4)    
     parser.add_argument('--batch_norm', action = 'store_true', default = False) 
+    parser.add_argument('--rpn_weight', type = float, default = 1.0)    
+    parser.add_argument('--cls_weight', type = float, default = 1.0)    
+    parser.add_argument('--rpn_reg_weight', type = float, default = 10.0)    
+    parser.add_argument('--cls_reg_weight', type = float, default = 10.0)    
     
-    parser.add_argument('--num_rois', type = int, default = 64) 
-    parser.add_argument('--num_objects', type = int, default = 20) 
-    parser.add_argument('--bbox_per_class', action = 'store_true', default = False) 
-    parser.add_argument('--rpn_weight', type = float, default = 1.0)      
-    parser.add_argument('--cls_weight', type = float, default = 1.0)      
-    parser.add_argument('--rpn_reg_weight', type = float, default = 10.0) 
-    parser.add_argument('--cls_reg_weight', type = float, default = 8.0) 
+    parser.add_argument('--num_rois', type = int, default = 100)    
+    parser.add_argument('--num_object_per_class', type = int, default = 10)    
+    parser.add_argument('--bbox_reg', action = 'store_true', default = False)    
+    parser.add_argument('--bbox_per_class', action = 'store_true', default = False)    
 
     args = parser.parse_args()
 
@@ -74,10 +78,6 @@ def main(argv):
             elif args.load_basic_model:
                 model.load2(args.basic_model_file, sess)
 
-            #model.save(sess)
-            model.prepare_data_for_rpn(train_data)
-            model.prepare_data_for_classifier(train_data)
-
             if args.component_to_train == 'all':               # train everything
                 model.train(sess, train_data)
             elif args.component_to_train == 'rpn':             # train rpn only
@@ -86,10 +86,15 @@ def main(argv):
                 model.train_classifier(sess, train_data)       # train classifier only
  
         elif args.phase == 'val':
-            val_coco, val_data = prepare_val_data(args)
             model = ObjectDetector(args, 'val')
             model.load(sess)
-            model.val(sess, val_coco, val_data)
+
+            if args.dataset == 'coco':
+                val_coco, val_data = prepare_val_coco_data(args)
+                model.val_coco(sess, val_coco, val_data)
+            else:
+                val_pascal, val_data = prepare_val_pascal_data(args)
+                model.val_pascal(sess, val_pascal, val_data)
 
         else:
             test_data = prepare_test_data(args)
