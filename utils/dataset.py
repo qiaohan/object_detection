@@ -3,6 +3,7 @@ import numpy as np
 import tensorflow as tf
 import cv2
 import xml.etree.ElementTree as ET
+from tqdm import tqdm
 
 from coco.coco import *
 
@@ -141,7 +142,7 @@ def prepare_train_coco_data(args):
         gt_classes.append(classes)  
         gt_bboxes.append(bboxes) 
  
-    print("Building the training dataset ...")
+    print("Building the training dataset...")
     dataset = DataSet(img_ids, img_files, img_heights, img_widths, batch_size, anchor_files, roi_files, gt_classes, gt_bboxes, True, True)
     print("Dataset built.")
     return coco, dataset
@@ -202,14 +203,14 @@ def prepare_train_pascal_data(args):
         gt_classes.append(classes)  
         gt_bboxes.append(bboxes) 
  
-    print("Building the training dataset ...")
+    print("Building the training dataset...")
     dataset = DataSet(img_ids, img_files, img_heights, img_widths, batch_size, anchor_files, roi_files, gt_classes, gt_bboxes, True, True)
     print("Dataset built.")
     return dataset
 
 
-def prepare_val_data(args):
-    image_dir, annotation_file = args.val_image_dir, args.val_annotation_file
+def prepare_val_coco_data(args):
+    image_dir, annotation_file = args.val_coco_image_dir, args.val_coco_annotation_file
 
     coco = COCO(annotation_file)
 
@@ -223,10 +224,151 @@ def prepare_val_data(args):
         img_heights.append(coco.imgs[img_id]['height'])         
         img_widths.append(coco.imgs[img_id]['width'])         
 
-    print("Building the validation dataset ...")
+    print("Building the validation dataset...")
     dataset = DataSet(img_ids, img_files, img_heights, img_widths)
     print("Dataset built.")
     return coco, dataset
+
+
+def prepare_val_pascal_data(args):
+    image_dir, annotation_dir = args.val_pascal_image_dir, args.val_pascal_annotation_dir
+
+    files = os.listdir(annotation_dir)
+    img_ids = list(range(len(files)))
+
+    img_files = []
+    img_heights = []
+    img_widths = []
+
+    pascal = {}
+
+    for f in files:
+        annotation = os.path.join(annotation_dir, f)
+
+        tree = ET.parse(annotation)
+        root = tree.getroot()
+
+        img_name = root.find('filename').text 
+        pascal[img_name] = []
+
+        img_file = os.path.join(image_dir, img_name)
+        img_files.append(img_file) 
+ 
+        size = root.find('size')
+        img_height = int(size.find('height').text)
+        img_width = int(size.find('width').text)
+        img_heights.append(img_height) 
+        img_widths.append(img_width) 
+
+        for obj in root.findall('object'): 
+            class_name = obj.find('name').text
+            class_id = pascal_class_ids[class_name]
+            temp = obj.find('difficult')
+            difficult = int(temp.text) if temp!=None else 0
+
+            bndbox = obj.find('bndbox')
+            xmin = int(bndbox.find('xmin').text)
+            ymin = int(bndbox.find('ymin').text)
+            xmax = int(bndbox.find('xmax').text)
+            ymax = int(bndbox.find('ymax').text)
+
+            pascal[img_name].append({'class_id': class_id, 'bbox':[xmin, ymin, xmax, ymax], 'difficult': difficult})
+
+    print("Building the validation dataset...")
+    dataset = DataSet(img_ids, img_files, img_heights, img_widths)
+    print("Dataset built.")
+    return pascal, dataset
+
+
+def eval_pascal_one_class(pascal, detections, c):
+    gts = {} 
+    num_objs = 0 
+    for img_name in pascal:
+        gts[img_name] = []
+        for obj in pascal[img_name]:
+            if obj['class_id'] == c and obj['difficult']==0:
+                gts[img_name] += [{'bbox':obj['bbox'], 'detected': False}]
+                num_objs += 1
+
+    dts = []
+    scores = []
+    num_dets = 0
+    for img_name in detections:
+        for dt in detections[img_name]:
+            if dt['class_id'] == c:
+                dts.append([img_name, dt['bbox'], dt['score']])
+                scores.append(dt['score'])
+                num_dets += 1
+
+    scores = np.array(scores, np.float32)
+    sorted_idx = np.argsort(scores)[::-1]
+
+    tp = np.zeros((num_dets))
+    fp = np.zeros((num_dets))
+
+    for i in tqdm(list(range(num_dets))):
+        idx = sorted_idx[i]
+
+        img_name = dts[idx][0]
+        bbox = dts[idx][1]   
+    
+        gt_bboxes = np.array([obj['bbox'] for obj in gts[img_name]], np.float32)
+
+        max_iou = 0.0
+
+        if gt_bboxes.size > 0:
+            ixmin = np.maximum(gt_bboxes[:, 0], bbox[0])
+            iymin = np.maximum(gt_bboxes[:, 1], bbox[1])
+            ixmax = np.minimum(gt_bboxes[:, 2], bbox[2])
+            iymax = np.minimum(gt_bboxes[:, 3], bbox[3])
+
+            iw = np.maximum(ixmax - ixmin + 1.0, 0.0)
+            ih = np.maximum(iymax - iymin + 1.0, 0.0)
+
+            area_intersect = iw * ih
+
+            area_union = (bbox[2] - bbox[0] + 1.0) * (bbox[3] - bbox[1] + 1.0) + (gt_bboxes[:, 2] - gt_bboxes[:, 0] + 1.0) * (gt_bboxes[:, 3] - gt_bboxes[:, 1] + 1.0) - area_intersect
+
+            ious = area_intersect / area_union
+            max_iou = np.max(ious, axis=0)
+            j = np.argmax(ious)
+
+        if max_iou > 0.5:
+            if not gts[img_name][j]['detected']:
+                tp[i] = 1.0
+                gts[img_name][j]['detected'] = True
+            else:
+                fp[i] = 1.0
+        else:
+            fp[i] = 1.0
+
+    tp = np.cumsum(tp)
+    fp = np.cumsum(fp)
+
+    rec = tp * 1.0 / num_objs
+    prec = tp * 1.0 / np.maximum((tp + fp), np.finfo(np.float64).eps)
+
+    mrec = np.concatenate(([0.], rec, [1.]))
+    mpre = np.concatenate(([0.], prec, [0.]))
+
+    for i in range(mpre.size - 1, 0, -1):
+        mpre[i - 1] = np.maximum(mpre[i - 1], mpre[i])
+
+    i = np.where(mrec[1:] != mrec[:-1])[0]
+
+    ap = np.sum((mrec[i + 1] - mrec[i]) * mpre[i + 1])
+    print('average precision for class %s = %f' %(pascal_class_names[c], ap))
+
+    return ap
+
+
+def eval_pascal(pascal, detections):
+    ap = 0.0 
+    for i in range(pascal_num_classes-1):
+        ap += eval_pascal_one_class(pascal, detections, i)
+    ap = ap / (pascal_num_classes-1)
+    print('mean average precision = %f' %ap)
+    return ap
 
 
 def prepare_test_data(args):
@@ -239,7 +381,7 @@ def prepare_test_data(args):
     img_files = []
     img_heights = []
     img_widths = []
-
+      
     for f in files:
         img_path = os.path.join(image_dir, f)
         img_files.append(img_path)
@@ -247,7 +389,7 @@ def prepare_test_data(args):
         img_heights.append(img.shape[0]) 
         img_widths.append(img.shape[1]) 
 
-    print("Building the testing dataset ...")
+    print("Building the testing dataset...")
     dataset = DataSet(img_ids, img_files, img_heights, img_widths)
     print("Dataset built.")
     return dataset

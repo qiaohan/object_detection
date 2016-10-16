@@ -19,7 +19,6 @@ def iou_bbox(bboxes1, bboxes2):
     iou = area_overlap / area_union
     return iou
 
-
 def param_bbox(bboxes, anchors):
     bboxes = np.array(bboxes, np.float32)
     anchors = np.array(anchors, np.float32)
@@ -29,7 +28,6 @@ def param_bbox(bboxes, anchors):
 
     t = np.concatenate((tyx, thw), axis=1)
     return t
-
 
 def unparam_bbox(t, anchors, max_shape=None):
     t = np.array(t, np.float32)
@@ -45,11 +43,13 @@ def unparam_bbox(t, anchors, max_shape=None):
 
     return bboxes
 
-
 def rectify_bbox(bboxes, max_shape):
-    h, w = max_shape
-    n, _ = bboxes.shape
     bboxes = np.array(bboxes, np.int32)
+    n = bboxes.shape[0]
+    if n == 0:
+        return bboxes
+
+    h, w = max_shape
 
     bboxes[:, 0] = np.maximum(bboxes[:, 0], np.zeros((n)))
     bboxes[:, 0] = np.minimum(bboxes[:, 0], (h-1) * np.ones((n)))
@@ -62,11 +62,13 @@ def rectify_bbox(bboxes, max_shape):
 
     return bboxes
     
-
 def convert_bbox(bboxes, old_shape, new_shape):
+    bboxes = np.array(bboxes, np.float32)
+    if bboxes.shape[0] == 0:
+        return bboxes
+
     oh, ow = old_shape
     nh, nw = new_shape
-    bboxes = np.array(bboxes, np.float32)
 
     bboxes[:, 0] = bboxes[:, 0] * nh / oh
     bboxes[:, 1] = bboxes[:, 1] * nw / ow
@@ -75,7 +77,6 @@ def convert_bbox(bboxes, old_shape, new_shape):
 
     bboxes = rectify_bbox(bboxes, new_shape)
     return bboxes
-
 
 def generate_anchors(img_shape, feat_shape, scales, ratios):
     ih, iw = img_shape
@@ -126,12 +127,14 @@ def generate_anchors(img_shape, feat_shape, scales, ratios):
     w = np.expand_dims(w, 1)
     anchors = np.concatenate((y, x, h, w), axis=1)
 
-    return anchors, anchor_in_img
+    anchor_in_img1 = anchor_in_img.reshape((fh*fw, ls*lr))
+    num_anchor_in_img = np.sum(anchor_in_img1, axis=0)
 
+    return anchors, anchor_in_img, num_anchor_in_img
 
-def label_anchors(anchors, anchor_in_img, gt_bboxes, iou_low_threshold=0.3, iou_high_threshold=0.7):
-    n, _ = anchors.shape
-    k, _ = gt_bboxes.shape
+def label_anchors(anchors, anchor_in_img, gt_classes, gt_bboxes, iou_low_threshold=0.4, iou_high_threshold=0.6):
+    n = anchors.shape[0]
+    k = gt_bboxes.shape[0]
     
     tiled_anchors = np.tile(np.expand_dims(anchors, 1), (1, k, 1))
     tiled_gt_bboxes = np.tile(np.expand_dims(gt_bboxes, 0), (n, 1, 1))
@@ -139,41 +142,73 @@ def label_anchors(anchors, anchor_in_img, gt_bboxes, iou_low_threshold=0.3, iou_
     tiled_anchors = tiled_anchors.reshape((-1, 4))
     tiled_gt_bboxes = tiled_gt_bboxes.reshape((-1, 4))
 
-    tiled_anchor_in_img = np.tile(np.expand_dims(anchor_in_img, 1), (1, k))
-    tiled_anchor_in_img = tiled_anchor_in_img.reshape((-1)) 
-
     ious = iou_bbox(tiled_anchors, tiled_gt_bboxes)
-    ious = ious * tiled_anchor_in_img   # ignore the anchors which corss the boundaries during training
     ious = ious.reshape(n, k)
 
     max_iou = np.amax(ious, axis=1)
- 
-    best_gt_bbox_ids = np.argmax(ious, axis=1)
-    best_gt_bboxes = gt_bboxes[best_gt_bbox_ids]
 
-    best_anchor_ids = np.argmax(ious, axis=0)
+    best_gt_bbox_ids = np.argmax(ious, axis=1)
+    bboxes = gt_bboxes[best_gt_bbox_ids]
+    classes = gt_classes[best_gt_bbox_ids]
+
+ #   best_anchor_ids = np.argmax(ious, axis=0)
 
     labels = -np.ones((n), np.int32)
-    labels[np.where(max_iou >= iou_high_threshold)[0]] = 1
-    labels[np.where(max_iou < iou_low_threshold)[0]] = 0
-    labels[best_anchor_ids] = 1
 
-    return labels, best_gt_bboxes
+    positive_idx = np.where(max_iou >= iou_high_threshold)[0]
+    labels[positive_idx] = 1
 
+    negative_idx = np.where(max_iou < iou_low_threshold)[0]
+    labels[negative_idx] = 0
 
-def sample_anchors(labels):
-    P = (labels == 1) * 1.0
-    N = (labels == 0) * 1.0
+    ignore_idx = np.where(anchor_in_img == 0)[0]
+    labels[ignore_idx] = -1
 
-    ratio = min(np.sum(P) * 1.5 / np.sum(N), 1.0)
-    temp = np.random.uniform(0, 1, (len(labels)))
-    masks = P + N * (temp < ratio)
+ #   labels[best_anchor_ids] = 1
 
-    return masks.astype(np.float32)
+    return labels, bboxes, classes
 
+def sample_anchors(labels, k):
+    l = len(labels)
+    n = l/k
+    labels = labels.reshape((n, k))
 
-def label_rois(rois, gt_classes, gt_bboxes, background_id, iou_threshold=0.5):
-    n, _ = rois.shape
+    masks = np.zeros((n, k), np.float32)
+
+    for i in range(k):
+        current_labels = labels[:, i] 
+
+        positive_idx = np.where(current_labels == 1)[0] 
+        negative_idx = np.where(current_labels == 0)[0] 
+
+        num_positives = len(positive_idx)
+        num_negatives = len(negative_idx)
+
+        current_masks = np.zeros((n), np.float32) 
+
+        if num_positives + num_negatives <= 12: 
+            current_masks[positive_idx] = 1.0 
+            current_masks[negative_idx] = 1.0 
+
+        else:
+            if num_positives > 0: 
+                positive_ratio = 4.0 / num_positives 
+                temp = np.random.uniform(0, 1, (num_positives)) 
+                current_masks[positive_idx] = (temp < positive_ratio) * 1.0 
+
+            if num_negatives > 0: 
+                negative_ratio = 8.0 / num_negatives 
+                temp = np.random.uniform(0, 1, (num_negatives)) 
+                current_masks[negative_idx] = (temp < negative_ratio) * 1.0 
+
+        masks[:, i] = current_masks 
+
+    masks = masks.reshape((-1))
+
+    return masks 
+
+def label_rois(rois, gt_classes, gt_bboxes, background_id, iou_low_thresh1old=0.4, iou_high_threshold=0.6):
+    n = rois.shape[0]
     k = len(gt_classes)
     
     tiled_rois = np.tile(np.expand_dims(rois, 1), (1, k, 1))
@@ -190,11 +225,18 @@ def label_rois(rois, gt_classes, gt_bboxes, background_id, iou_threshold=0.5):
     best_gt_bbox_ids = np.argmax(ious, axis=1)
     best_gt_bboxes = gt_bboxes[best_gt_bbox_ids]
 
-    labels = gt_classes[best_gt_bbox_ids]
-    labels[np.where(max_iou < iou_threshold)[0]] = background_id
+    positive_idxs = np.where(max_iou>=iou_high_threshold)[0]
+    negative_idxs = np.where(max_iou<iou_low_threshold)[0]
+    chosen_idxs = np.concatenate((positive_idxs, negative_idxs), axis=0)
 
-    return labels, best_gt_bboxes
+    rois = rois[chosen_idxs]
+    bboxes = best_gt_bboxes[chosen_idxs]
 
+    positive_labels = gt_classes[best_gt_bbox_ids[positive_idxs]]        
+    negative_labels = np.ones([background_id] * len(negative_idxs), np.int32)
+    classes = np.concatenate((positive_labels, negative_labels), axis=0)
+
+    return rois, classes, bboxes
 
 def nms(scores, bboxes, k, iou_threshold=0.7):
     n = len(scores)
@@ -208,7 +250,7 @@ def nms(scores, bboxes, k, iou_threshold=0.7):
     i = 0
 
     while i < n and size < k:
-        if sorted_scores[i] < 0.6:
+        if sorted_scores[i] < 0.5:
             break
         top_k_ids.append(i)
         size += 1
@@ -223,33 +265,55 @@ def nms(scores, bboxes, k, iou_threshold=0.7):
 
     return size, sorted_scores[top_k_ids], sorted_bboxes[top_k_ids]
 
-
-def nms2(scores, classes, bboxes, k, iou_threshold=0.5):
+def postprocess(scores, classes, bboxes, k, iou_threshold=0.3):
     n = len(scores)
+ 
+    count_per_cls = {cls:0 for cls in classes}
+    bbox_per_cls = {cls:[] for cls in classes}
+    score_per_cls = {cls:[] for cls in classes}
 
-    idx = np.argsort(scores)[::-1]
-    sorted_scores = scores[idx]
-    sorted_classes = classes[idx]
-    sorted_bboxes = bboxes[idx]
+    for i in range(n):
+        count_per_cls[classes[i]] += 1
+        bbox_per_cls[classes[i]] += [bboxes[i]]
+        score_per_cls[classes[i]] += [scores[i]]
+        
+    dt_num = 0
+    dt_classes = []    
+    dt_scores = []
+    dt_bboxes = []
 
-    top_k_ids = []
-    size = 0
-    i = 0
+    for cls in count_per_cls:
+        current_count = count_per_cls[cls]
+        current_scores = np.array(score_per_cls[cls], np.float32)
+        current_bboxes = np.array(bbox_per_cls[cls], np.int32)
 
-    while i < n and size < k:
-        if sorted_scores[i] < 0.5:
-            break
-        top_k_ids.append(i)
-        size += 1
-        i += 1
+        idx = np.argsort(current_scores)[::-1]
+        max_score = current_scores[idx[0]]
+        sorted_scores = current_scores[idx]
+        sorted_bboxes = current_bboxes[idx]
 
-        while i < n:
-            tiled_bbox_i = np.tile(sorted_bboxes[i], (size, 1))
-            ious = iou_bbox(tiled_bbox_i, sorted_bboxes[top_k_ids])
-            if np.amax(ious) > iou_threshold:
-                i += 1
-            else:
+        top_k_ids = []
+        size = 0
+        i = 0
+
+        while i < current_count and size < k:
+            if sorted_scores[i] < max(0.75 * max_score, 0.5):
                 break
+            top_k_ids.append(i)
+            dt_num += 1
+            dt_classes.append(cls)
+            dt_scores.append(sorted_scores[i])
+            dt_bboxes.append(sorted_bboxes[i])
+            size += 1
+            i += 1
 
-    return size, sorted_scores[top_k_ids], sorted_classes[top_k_ids], sorted_bboxes[top_k_ids]
+            while i < current_count:
+                tiled_bbox_i = np.tile(sorted_bboxes[i], (size, 1))
+                ious = iou_bbox(tiled_bbox_i, sorted_bboxes[top_k_ids])
+                if np.amax(ious) > iou_threshold:
+                    i += 1
+                else:
+                    break
+
+    return dt_num, np.array(dt_scores, np.float32), np.array(dt_classes, np.int32), np.array(dt_bboxes, np.int32)
 
